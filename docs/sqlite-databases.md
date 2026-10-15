@@ -97,7 +97,13 @@ and cleanup. Additional requests receive a typed capacity error before reading
 files or creating workers; retry after an active inspection finishes. This
 bounds simultaneous input buffering and private snapshot/worker counts.
 
-The database and WAL together are limited to 256 MiB. SQLite values/records,
+The database and WAL together are limited to 256 MiB. Exceeding this snapshot
+budget returns `resource_constraint` with `retryable: false`. The error's
+`reported_limits.snapshot_input_bytes` gives the bound in bytes, while
+`reported_limits.observed_bytes` preserves the exact file-set size as a decimal
+string. Supply a smaller offline snapshot, for example by exporting
+the relevant tables through the application's backup or export workflow.
+SQLite values/records,
 SQL statements and the complete worker JSON reply each have a 16 MiB limit.
 The owned worker has a 256 MiB JavaScript heap limit and a 30-second inspection
 deadline. SQLite native allocations are separate from the JavaScript heap;

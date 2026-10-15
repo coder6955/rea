@@ -3,7 +3,10 @@ import { constants, type BigIntStats } from "node:fs";
 import { join } from "node:path";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
-import { AnalysisInputError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisInputError,
+  AnalysisResourceConstraintError,
+} from "../domain/analysisErrorCore.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import {
   readStableArtifact,
@@ -206,9 +209,18 @@ export const captureSqliteDatabaseSnapshot = async (
     );
   const selectedSize = database.size + (wal?.size ?? 0n);
   if (selectedSize > BigInt(SQLITE_DATABASE_LIMITS.inputBytes))
-    throw new ArtifactReaderFailure(
-      "limit",
+    throw new AnalysisResourceConstraintError(
+      "inspect_sqlite_database",
+      "file-size",
       `Selected SQLite database and WAL exceed the combined ${String(SQLITE_DATABASE_LIMITS.inputBytes)}-byte snapshot budget: ${path}`,
+      {
+        snapshot_input_bytes: SQLITE_DATABASE_LIMITS.inputBytes,
+        observed_bytes: selectedSize.toString(),
+      },
+      {
+        remediationAction:
+          "Supply a smaller offline snapshot, for example by exporting the relevant tables through the application's backup or export workflow.",
+      },
     );
   const snapshotPath = join(root, "database.snapshot");
   const captured = await readObservedArtifact(

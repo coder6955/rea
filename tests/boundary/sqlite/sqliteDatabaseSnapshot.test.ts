@@ -1,9 +1,11 @@
 import {
   lstat,
   open,
+  readdir,
   readFile,
   rename,
   symlink,
+  truncate,
   unlink,
   utimes,
   writeFile,
@@ -15,6 +17,8 @@ import type { StableArtifactFileSystem } from "../../../src/artifacts/readStable
 import { captureSqliteDatabaseSnapshot } from "../../../src/sqlite/SqliteDatabaseSnapshot.js";
 import { inspectSqliteDatabaseSnapshot } from "../../../src/sqlite/SqliteDatabaseInspection.js";
 import { sqliteDatabaseFailure } from "../../../src/sqlite/SqliteDatabaseFailures.js";
+import { SQLITE_DATABASE_LIMITS } from "../../../src/sqlite/SqliteDatabaseLimits.js";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import {
   createSqliteDatabaseFixture,
   SQLITE_NATIVE_LIMITS_AVAILABLE,
@@ -45,6 +49,41 @@ const fixture = async (wal = false) => {
     );
   return { workspace, database, root, capture };
 };
+
+it.each([
+  ["database", SQLITE_DATABASE_LIMITS.inputBytes + 1, 0],
+  ["WAL", 8192, SQLITE_DATABASE_LIMITS.inputBytes + 1],
+  ["combined file set", SQLITE_DATABASE_LIMITS.inputBytes, 1],
+] as const)(
+  "reports an oversized %s as a non-retryable snapshot resource constraint before copying",
+  async (_member, databaseBytes, walBytes) => {
+    const { database, root, capture } = await fixture();
+    await truncate(database.path, databaseBytes);
+    if (walBytes > 0) {
+      await writeFile(database.walPath, "");
+      await truncate(database.walPath, walBytes);
+    }
+    const cause = await capture().catch((cause: unknown) => cause);
+    const error = projectAnalysisError(
+      sqliteDatabaseFailure(cause, database.path, "artifact-read"),
+    );
+    expect(error).toMatchObject({
+      code: "resource_constraint",
+      category: "resource_constraint",
+      retryable: false,
+      remediation: { action: expect.stringContaining("smaller") },
+      details: {
+        operation: "inspect_sqlite_database",
+        resource: "file-size",
+        reported_limits: {
+          snapshot_input_bytes: SQLITE_DATABASE_LIMITS.inputBytes,
+          observed_bytes: String(databaseBytes + walBytes),
+        },
+      },
+    });
+    expect(await readdir(root)).toEqual([]);
+  },
+);
 
 it.runIf(SQLITE_NATIVE_LIMITS_AVAILABLE).each(["PERSIST", "TRUNCATE"])(
   "inspects a committed %s journal without modifying the source file set",

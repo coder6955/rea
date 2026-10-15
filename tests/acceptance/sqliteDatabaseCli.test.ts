@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { expect, onTestFinished } from "vitest";
 import { z } from "zod";
+import { SQLITE_DATABASE_LIMITS } from "../../src/sqlite/SqliteDatabaseLimits.js";
 import {
   expandProviderCapabilities,
   expandToolAvailability,
@@ -19,6 +20,47 @@ import { cliTest } from "../support/cli/cliFixture.js";
 
 const digest = (bytes: Buffer): string =>
   createHash("sha256").update(bytes).digest("hex");
+
+cliTest.runIf(SQLITE_NATIVE_LIMITS_AVAILABLE).for([false, true])(
+  "reports the snapshot byte budget consistently through CLI and MCP (WAL: %s)",
+  async (withWal, { cli }) => {
+    const root = await createTestTempDirectory("rea-sqlite-input-budget-");
+    const path = join(root, "large.db");
+    const database = new DatabaseSync(path);
+    try {
+      database.exec("CREATE TABLE selected(value TEXT)");
+    } finally {
+      database.close();
+    }
+    const databaseBytes = SQLITE_DATABASE_LIMITS.inputBytes + (withWal ? 0 : 1);
+    await truncate(path, databaseBytes);
+    if (withWal) await writeFile(`${path}-wal`, "x");
+    const result = await cli.run({
+      arguments: ["inspect-sqlite-database", path, "--json"],
+      environment: { REA_LOG_LEVEL: "silent" },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.json).toMatchObject({
+      code: "resource_constraint",
+      category: "resource_constraint",
+      retryable: false,
+      remediation: { action: expect.stringContaining("smaller") },
+      details: {
+        operation: "inspect_sqlite_database",
+        resource: "file-size",
+        reported_limits: {
+          snapshot_input_bytes: SQLITE_DATABASE_LIMITS.inputBytes,
+          observed_bytes: String(SQLITE_DATABASE_LIMITS.inputBytes + 1),
+        },
+      },
+    });
+    const { call } = await connectLocalToolsMcp();
+    const response = await call("inspect_sqlite_database", { path });
+    expect(parseMcpToolError(response).error).toEqual(result.json);
+    expect((await stat(path)).size).toBe(databaseBytes);
+    if (withWal) expect((await stat(`${path}-wal`)).size).toBe(1);
+  },
+);
 
 cliTest.runIf(SQLITE_NATIVE_LIMITS_AVAILABLE)(
   "bounds default context and projects exact columns without evaluating unrelated cells",
