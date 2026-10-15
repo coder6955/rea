@@ -1,0 +1,93 @@
+name: Validate SQLite snapshot limit 4127
+
+on:
+  push:
+    branches: [validation/sqlite-4127]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HUSKY: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fc79b673803e828c4bd47cf012b2e726abd8eecd
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Record source and runtime
+        run: |
+          git rev-parse HEAD
+          node --version
+          npm --version
+      - name: Confirm regressions fail on original snapshot producer
+        run: |
+          git show e9a71efa31d6c3675b67938b8a79fa4ddf01604c:src/sqlite/SqliteDatabaseSnapshot.ts > src/sqlite/SqliteDatabaseSnapshot.ts
+          set +e
+          npm run test:focused -- tests/boundary/sqlite/sqliteDatabaseSnapshot.test.ts 2>&1 | tee before.log
+          result=${PIPESTATUS[0]}
+          set -e
+          git restore src/sqlite/SqliteDatabaseSnapshot.ts
+          test "$result" -ne 0
+          grep '3 failed' before.log
+      - name: Verify real SQLite provider and CLI/MCP tests
+        run: npm run test:sqlite 2>&1 | tee sqlite-tests.log
+      - name: Verify static checks
+        run: npm run check 2>&1 | tee static-checks.log
+      - name: Verify documentation
+        run: npm run docs:check 2>&1 | tee docs-checks.log
+      - name: Verify actual oversized SQLite database through CLI
+        run: |
+          node --input-type=module > real-cli.json <<'NODE'
+          import assert from 'node:assert/strict';
+          import { mkdtemp, stat, rm } from 'node:fs/promises';
+          import { tmpdir } from 'node:os';
+          import { join } from 'node:path';
+          import { spawnSync } from 'node:child_process';
+          import { DatabaseSync } from 'node:sqlite';
+          const root = await mkdtemp(join(tmpdir(), 'rea-4127-real-'));
+          try {
+            const path = join(root, 'large.db');
+            const database = new DatabaseSync(path);
+            try {
+              database.exec('CREATE TABLE big(value BLOB); BEGIN');
+              const insert = database.prepare('INSERT INTO big VALUES (zeroblob(1000000))');
+              for (let row = 0; row < 270; row++) insert.run();
+              database.exec('COMMIT');
+            } finally { database.close(); }
+            const size = (await stat(path, { bigint: true })).size;
+            const result = spawnSync(process.execPath, ['scripts/rea.mjs', 'inspect-sqlite-database', path, '--json'], { encoding: 'utf8', timeout: 60000 });
+            assert.equal(result.status, 1, result.stderr);
+            const error = JSON.parse(result.stdout);
+            assert.equal(error.code, 'resource_constraint');
+            assert.equal(error.category, 'resource_constraint');
+            assert.equal(error.retryable, false);
+            assert.equal(error.details.reported_limits.snapshot_input_bytes, 268435456);
+            assert.equal(error.details.reported_limits.observed_bytes, size.toString());
+            assert.match(error.remediation.action, /smaller/);
+            assert.equal((await stat(path, { bigint: true })).size, size);
+            console.log(JSON.stringify({ observed_bytes: size.toString(), error }, null, 2));
+          } finally { await rm(root, { recursive: true, force: true }); }
+          NODE
+      - name: Confirm source unchanged
+        run: git diff --exit-code
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sqlite-4127-linux-evidence
+          retention-days: 3
+          path: |
+            *.log
+            real-cli.json
