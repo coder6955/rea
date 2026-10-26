@@ -1,6 +1,56 @@
 import { expect, it } from "vitest";
 
 import { browserScenarioSchema } from "./browserScenario.js";
+import { browserScenarioActionSchema } from "./browserScenarioValues.js";
+
+it.each([
+  ["/", true],
+  ["/api/folders?name=test", true],
+  ["/api//folder", true],
+  ["/api\\folder", true],
+  ["/\n", true],
+  ["/\r\n", true],
+  ["", false],
+  ["api/folders", false],
+  ["https://example.test/", false],
+  ["//example.test/", false],
+  ["/\\example.test/", false],
+])("preserves request path admission for %j", (path, accepted) => {
+  expect(
+    browserScenarioActionSchema.safeParse({
+      step_id: "request",
+      action: "request",
+      method: "GET",
+      path,
+    }).success,
+  ).toBe(accepted);
+});
+
+it.each([
+  ["X-Request-Id", true],
+  ["!#$%&'*+.^_`|~0123456789AZaz-", true],
+  ["", false],
+  ["X Header", false],
+  ["X:Header", false],
+  ["X(Header)", false],
+  ["X[Header]", false],
+  ["X/Header", false],
+  ["X\\Header", false],
+  ["X\nHeader", false],
+  ["X-\u00e9", false],
+  ["Host", false],
+  ["Sec-Fetch-Site", false],
+])("preserves request header admission for %j", (name, accepted) => {
+  expect(
+    browserScenarioActionSchema.safeParse({
+      step_id: "request",
+      action: "request",
+      method: "GET",
+      path: "/",
+      headers: [{ name, value: { source: "literal", value: "value" } }],
+    }).success,
+  ).toBe(accepted);
+});
 
 it("accepts large action, secret, and storage selections", () => {
   const actions = Array.from({ length: 129 }, (_, index) => ({
